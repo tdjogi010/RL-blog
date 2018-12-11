@@ -2,9 +2,13 @@ import tensorflow as tf
 import gym
 import numpy as np
 
+from network import get_mlp_network
+from wrappedEnv import WrappedEnv
+
 #common components
 fc = tf.layers.dense #fully connected network
 relu = tf.nn.relu
+tanh = tf.tanh
 conv2d = tf.layers.conv2d
 xavier_init = tf.contrib.layers.xavier_initializer # same as tf.contrib.layers.xavier_initializer_conv2d
 sess = tf.Session()
@@ -29,25 +33,9 @@ mini_batch_size = batch_size // number_of_mini_batch
 
 number_of_epochs = 4 # number of epochs (after creating a batch)
 
+env_id = 'Breakout-v0'
 save_path = './tmp1/agent'
-load_path = '/tmp/model'
-
-def conv_to_fc(x):
-    nh = np.prod([v.value for v in x.get_shape()[1:]])
-    x = tf.reshape(x, [-1, nh])
-    return x
-
-#obs is 4D vector
-def get_cnn_network(obs):
-    #preprocess
-    preprocessed = tf.cast(obs, tf.float32) / 255
-    
-    #network
-    h = conv2d(preprocessed, filters=32, kernel_size=[8,8], strides=4, padding='valid',activation=relu, name='h1', kernel_initializer=xavier_init()) 
-    h2 = conv2d(h, 64, [4,4], 2, activation=relu, name='h2', kernel_initializer=xavier_init())
-    h3 = conv2d(h2, 64, [3,3], 1, activation=relu, name='h3', kernel_initializer=xavier_init())
-    h3 = conv_to_fc(h)
-    return fc(h3, 512, activation=None, kernel_initializer=xavier_init()) # will be fed to get pi(s,a) and vf(s)
+load_path = './tmp/agent-256'
 
 class Agent:
     def __init__(self, env):
@@ -55,7 +43,7 @@ class Agent:
         OBS = tf.placeholder(tf.float32, (None,) + env.observation_space.shape, 'obs')
 
         # network
-        network_out = get_cnn_network(OBS)
+        network_out = get_mlp_network(OBS)# get_cnn_network(OBS)
         # policy outputing probability distribution of actions
         pi = fc(network_out, env.action_space.n, activation=tf.nn.softmax, kernel_initializer=xavier_init(), name='pi')
         sample_action = tf.multinomial(tf.log(pi), 1, name='sample_action')
@@ -104,11 +92,11 @@ class Agent:
         loss = pg_loss - entropy * entropy_coefficient + vf_loss * vf_coefficient
         train_op = tf.train.AdamOptimizer(learning_rate=lr, epsilon=epsilon).minimize(loss)
 
-        #agent taking a step gives u (ie sampling an) action along with value estimate V(s) and pi(a,s) given the observation 
+        # agent taking a step gives u (ie sampling an) action along with value estimate V(s) and pi(a,s) given the observation 
         def step(obs):
             return sess.run([sample_action, pi_action, vf], feed_dict={OBS: obs})
         
-        #train the agent. gives u losses (pg_loss, vf_loss, policy_entropy)
+        # Strain the agent. gives u losses (pg_loss, vf_loss, policy_entropy)
         def train(obs, actions, returns, pi_action_old, vf_old,  advs) :
             advs = (advs - advs.mean()) / (advs.std())
             return sess.run([train_op, loss, pg_loss, vf_loss, entropy],{OBS: obs, ACTION: actions, RETURNS: returns,
@@ -124,16 +112,16 @@ class Agent:
     def restore(self):
         self.saver.restore(sess, load_path)
 
-
-env = gym.make("Breakout-v0")
+env = gym.make(env_id)
+env = WrappedEnv(env)
 agent = Agent(env)
-if load_path != None:
+if load_path == None or load_path == '':
     sess.run(tf.global_variables_initializer())
 else:
     agent.restore()
+    print("agent restored!")
 
 obs = env.reset()
-
 # obs1,*_ = env.step(3)
 # print(agent.step([obs,obs1,obs1]))
 timesteps = 0
@@ -172,21 +160,6 @@ while True:
     _,_, last_vf = agent.step([obs])
     mb_returns = np.zeros_like(mb_rewards)
     mb_advs = np.zeros_like(mb_rewards)
-    
-    #GAE - generalised advantage estimation
-    # lastgaelam = 0
-    # for t in reversed(range(steps)):
-    #     # next stands for next state
-    #     if t == steps - 1:
-    #         # use the last done and last vf for last step
-    #         nextnonterminal = 1.0 - done
-    #         nextvalues = last_vf
-    #     else:
-    #         nextnonterminal = 1.0 - mb_dones[t+1]
-    #         nextvalues = mb_vfs[t+1]
-    #     delta = mb_rewards[t] + gamma * nextvalues * nextnonterminal - mb_vfs[t]
-    #     mb_advs[t] = lastgaelam = delta + gamma * lambdA * nextnonterminal * lastgaelam 
-    # mb_returns = mb_advs + mb_values
 
     # calculate R(t) = rew + gamma*rew + gamma^2*rew + ... + gamma^(nsteps-t)*vf(nsteps) 
     for t in reversed(range(steps)):
@@ -200,6 +173,7 @@ while True:
 
     mb_lossvals = []
     inds = np.arange(batch_size)
+    print("Updating after {}".format(timesteps))
     for _ in range(number_of_epochs):
         # Randomize the indexes
         np.random.shuffle(inds)
@@ -208,13 +182,9 @@ while True:
             end = start + mini_batch_size
             mbinds = inds[start:end]
             slices = (arr[mbinds] for arr in (mb_obs, mb_actions, mb_returns, mb_pi_actions, mb_vfs, mb_advs))
-            print("Gradient updating")
             mb_lossvals.append(agent.train(*slices))
-            print("Gradient updated")
         
+        print("Updated")
         print(mb_lossvals)
     
     agent.save(timesteps)
-
-
-
